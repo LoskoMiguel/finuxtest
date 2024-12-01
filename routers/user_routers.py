@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Depends
 from models.user import User, Login, Transferencias
 from db.connection import get_db_connection
 from core.security import create_jwt_token, decode_jwt_token
@@ -57,53 +57,88 @@ async def login_user(login: Login):
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    cursor.execute("SELECT id, password FROM usuarios WHERE dni = %s", (login.dni,))
-    user_data = cursor.fetchone()
+    try:
+        # Consulta combinada para obtener dni, password y rol en una sola consulta
+        cursor.execute("SELECT id, password, rol FROM usuarios WHERE dni = %s", (login.dni,))
+        user_data = cursor.fetchone()
 
-    if not user_data:
-        raise HTTPException(status_code=400, detail="DNI o contraseña incorrectos.")
+        if not user_data:
+            raise HTTPException(status_code=400, detail="DNI o contraseña incorrectos.")
 
-    user_id, stored_hashed_password = user_data
+        user_id, stored_hashed_password, user_rol = user_data
 
-    if not bcrypt.checkpw(login.password.encode('utf-8'), stored_hashed_password.encode('utf-8')):
-        raise HTTPException(status_code=400, detail="DNI o contraseña incorrectos.")
+        if not bcrypt.checkpw(login.password.encode('utf-8'), stored_hashed_password.encode('utf-8')):
+            raise HTTPException(status_code=400, detail="DNI o contraseña incorrectos.")
 
-    # Generar el token JWT
-    token = create_jwt_token(user_id)
+        # Generar el token JWT
+        token = create_jwt_token(user_id)
 
-    return {"msg": "Login exitoso", "token": token}
+        # Mapeo de roles más extensible
+        valid_roles = {
+            "admin": "admin",
+            "usuario": "usuario", 
+            "superusuario": "superusuario"
+        }
 
-# Ruta para transferencias, protegida con JWT
-@router.post("/transferencias")
-async def transfer_funds(transferencias: Transferencias, authorization: str = Header(None)):
-    # Validar el token
+        # Validar que el rol sea uno de los roles esperados
+        if user_rol not in valid_roles:
+            raise HTTPException(status_code=403, detail="Rol de usuario no válido")
+
+        return {
+            "msg": "Login exitoso", 
+            "token": token, 
+            "rol": valid_roles[user_rol]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en el inicio de sesión: {str(e)}")
+    finally:
+        cursor.close()
+        connection.close()
+
+def get_current_user(authorization: str = Header(None)):
     if not authorization:
         raise HTTPException(status_code=401, detail="Token no proporcionado.")
     
-    # Extraer el token del encabezado
-    token = authorization.split(" ")[1]  # Asumiendo que el formato es "Bearer TU_TOKEN"
+    token = authorization.split(" ")[1]  # Formato "Bearer <token>"
+    user_data = decode_jwt_token(token)
+    
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado.")
+    
+    return user_data  # Retorna el diccionario con datos del usuario, incluyendo el dni
 
+@router.post("/transferencias")
+async def transfer_funds(data: Transferencias, authorization: str = Header(None), current_user: dict = Depends(get_current_user)):
+    # Extraer la información del usuario autenticado (dni)
+    user_dni = current_user["dni"]
+    user_numero_cuenta = current_user["numero_cuenta"]
+    
+    if data.numero_cuenta_enviar != user_numero_cuenta:
+        raise HTTPException(status_code=400, detail="No puedes realizar transferencias desde una cuenta que no es tuya.")
+    
+    # Conexión a la base de datos
     connection = get_db_connection()
     cursor = connection.cursor()
     
     try:
         # Verificar la cuenta que envía los fondos
-        cursor.execute("SELECT id, numero_cuenta, cantidad_dinero, is_actived FROM usuarios WHERE numero_cuenta = %s", (transferencias.numero_cuenta_enviar,))
+        cursor.execute("SELECT id, numero_cuenta, cantidad_dinero, is_actived FROM usuarios WHERE numero_cuenta = %s", (data.numero_cuenta_enviar,))
         user_data = cursor.fetchone()
 
         if not user_data:
             raise HTTPException(status_code=400, detail="Número de cuenta del remitente incorrecto.")
-
+        
         user_id, user_numero_cuenta, user_cantidad_dinero, user_is_actived = user_data
 
         if not user_is_actived:
             raise HTTPException(status_code=400, detail="La cuenta del remitente no está activa.")
 
-        if user_cantidad_dinero < transferencias.cantidad_dinero:
+        if user_cantidad_dinero < data.cantidad_dinero:
             raise HTTPException(status_code=400, detail="Fondos insuficientes en la cuenta del remitente.")
 
         # Verificar la cuenta que recibe los fondos
-        cursor.execute("SELECT id, numero_cuenta, is_actived FROM usuarios WHERE numero_cuenta = %s", (transferencias.numero_cuenta_recibe,))
+        cursor.execute("SELECT id, numero_cuenta, is_actived FROM usuarios WHERE numero_cuenta = %s", (data.numero_cuenta_recibe,))
         recibir_data = cursor.fetchone()
 
         if not recibir_data:
@@ -114,15 +149,18 @@ async def transfer_funds(transferencias: Transferencias, authorization: str = He
         if not recibir_is_actived:
             raise HTTPException(status_code=400, detail="La cuenta del destinatario no está activa.")
 
-        if transferencias.numero_cuenta_enviar == transferencias.numero_cuenta_recibe:
+        if data.numero_cuenta_enviar == data.numero_cuenta_recibe:
             raise HTTPException(status_code=400, detail="No puedes transferir fondos a la misma cuenta.")
+        
+        if data.cantidad_dinero <= 0:
+            raise HTTPException(status_code=400, detail="No puedes transferir una cantidad de dinero igual o menor a 0")
 
         # Actualizar los saldos de ambas cuentas
-        cursor.execute("UPDATE usuarios SET cantidad_dinero = cantidad_dinero - %s WHERE numero_cuenta = %s", (transferencias.cantidad_dinero, transferencias.numero_cuenta_enviar,))
-        cursor.execute("UPDATE usuarios SET cantidad_dinero = cantidad_dinero + %s WHERE numero_cuenta = %s", (transferencias.cantidad_dinero, transferencias.numero_cuenta_recibe,))
+        cursor.execute("UPDATE usuarios SET cantidad_dinero = cantidad_dinero - %s WHERE numero_cuenta = %s", (data.cantidad_dinero, data.numero_cuenta_enviar,))
+        cursor.execute("UPDATE usuarios SET cantidad_dinero = cantidad_dinero + %s WHERE numero_cuenta = %s", (data.cantidad_dinero, data.numero_cuenta_recibe,))
         connection.commit()
 
-        return {"status": "Transferencia exitosa", "numero_cuenta_enviar": transferencias.numero_cuenta_enviar, "numero_cuenta_recibe": transferencias.numero_cuenta_recibe}
+        return {"status": "Transferencia exitosa", "numero_cuenta_enviar": data.numero_cuenta_enviar, "numero_cuenta_recibe": data.numero_cuenta_recibe}
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
