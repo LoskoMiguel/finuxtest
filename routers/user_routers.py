@@ -177,19 +177,16 @@ async def transfer_funds(data: Transferencias, authorization: str = Header(None)
 
 @router.post("/historial")
 async def check_history(data: Historial, authorization: str = Header(None), current_user: dict = Depends(get_current_user)):
-    # Extraer la información del usuario autenticado (dni)
     user_dni = current_user["dni"]
     user_numero_cuenta = current_user["numero_cuenta"]
     
     if data.numero_cuenta != user_numero_cuenta:
         raise HTTPException(status_code=400, detail="No Revisar El Historial De Otra Persona")
     
-    # Conexión a la base de datos
     connection = get_db_connection()
     cursor = connection.cursor()
     
     try:
-        # Verificar la cuenta que envía los fondos
         cursor.execute("SELECT numero_cuenta, is_actived FROM usuarios WHERE numero_cuenta = %s", (data.numero_cuenta,))
         user_data = cursor.fetchone()
 
@@ -201,14 +198,12 @@ async def check_history(data: Historial, authorization: str = Header(None), curr
         if not user_is_actived:
             raise HTTPException(status_code=400, detail="La cuenta Esta Desactivada")
         
-        # Verificar la cuenta que envía los fondos
         cursor.execute("SELECT cuenta_usuario, cuenta_receptor, cantidad_dinero_enviada, fecha_enviado FROM historial WHERE cuenta_usuario = %s", (data.numero_cuenta,))
-        history_data = cursor.fetchall()  # Cambiar fetchone a fetchall
+        history_data = cursor.fetchall()
 
         if not history_data:
             raise HTTPException(status_code=404, detail="No se encontró historial para esta cuenta.")
 
-        # Crear una lista de resultados
         result = []
         for record in history_data:
             cuenta_usuario, cuenta_receptor, cantidad_dinero_enviada, fecha_enviado = record
