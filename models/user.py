@@ -16,3 +16,6 @@ class Transferencias(BaseModel):
     numero_cuenta_enviar: str
     numero_cuenta_recibe: str
     cantidad_dinero: int
+
+class Historial(BaseModel):
+    numero_cuenta : str

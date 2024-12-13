@@ -49,4 +49,4 @@ def decode_jwt_token(token: str):
         decoded_payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return decoded_payload
     except JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+        raise HTTPException(status_code=401, detail="Token inválido o expirado") 

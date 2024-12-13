@@ -1,9 +1,10 @@
 from fastapi import APIRouter, HTTPException, Header, Depends
-from models.user import User, Login, Transferencias
+from models.user import User, Login, Transferencias, Historial
 from db.connection import get_db_connection
 from core.security import create_jwt_token, decode_jwt_token
 import bcrypt
 import random
+from datetime import datetime
 
 router = APIRouter()
 
@@ -158,9 +159,67 @@ async def transfer_funds(data: Transferencias, authorization: str = Header(None)
         # Actualizar los saldos de ambas cuentas
         cursor.execute("UPDATE usuarios SET cantidad_dinero = cantidad_dinero - %s WHERE numero_cuenta = %s", (data.cantidad_dinero, data.numero_cuenta_enviar,))
         cursor.execute("UPDATE usuarios SET cantidad_dinero = cantidad_dinero + %s WHERE numero_cuenta = %s", (data.cantidad_dinero, data.numero_cuenta_recibe,))
+        now = datetime.now()
+
+        # Guardar fecha y hora en una sola variable
+        fecha_y_hora = now.strftime("%Y-%m-%d %H:%M:%S") # Formato: YYYY-MM-DD HH:MM:SS
+        cursor.execute("INSERT INTO historial (user_id, cuenta_usuario, cuenta_receptor, cantidad_dinero_enviada, fecha_enviado) VALUES (%s, %s, %s, %s, %s)", (user_id, data.numero_cuenta_enviar, data.numero_cuenta_recibe, data.cantidad_dinero, fecha_y_hora,))
         connection.commit()
 
         return {"status": "Transferencia exitosa", "numero_cuenta_enviar": data.numero_cuenta_enviar, "numero_cuenta_recibe": data.numero_cuenta_recibe}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    finally:
+        cursor.close()
+        connection.close()
+
+@router.post("/historial")
+async def check_history(data: Historial, authorization: str = Header(None), current_user: dict = Depends(get_current_user)):
+    # Extraer la información del usuario autenticado (dni)
+    user_dni = current_user["dni"]
+    user_numero_cuenta = current_user["numero_cuenta"]
+    
+    if data.numero_cuenta != user_numero_cuenta:
+        raise HTTPException(status_code=400, detail="No Revisar El Historial De Otra Persona")
+    
+    # Conexión a la base de datos
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    
+    try:
+        # Verificar la cuenta que envía los fondos
+        cursor.execute("SELECT numero_cuenta, is_actived FROM usuarios WHERE numero_cuenta = %s", (data.numero_cuenta,))
+        user_data = cursor.fetchone()
+
+        if not user_data:
+            raise HTTPException(status_code=400, detail="Número de cuenta No Encontrado.")
+        
+        user_numero_cuenta, user_is_actived = user_data
+
+        if not user_is_actived:
+            raise HTTPException(status_code=400, detail="La cuenta Esta Desactivada")
+        
+        # Verificar la cuenta que envía los fondos
+        cursor.execute("SELECT cuenta_usuario, cuenta_receptor, cantidad_dinero_enviada, fecha_enviado FROM historial WHERE cuenta_usuario = %s", (data.numero_cuenta,))
+        history_data = cursor.fetchall()  # Cambiar fetchone a fetchall
+
+        if not history_data:
+            raise HTTPException(status_code=404, detail="No se encontró historial para esta cuenta.")
+
+        # Crear una lista de resultados
+        result = []
+        for record in history_data:
+            cuenta_usuario, cuenta_receptor, cantidad_dinero_enviada, fecha_enviado = record
+            result.append({
+                "Tu Cuenta": cuenta_usuario,
+                "Numero De Cuenta Receptor": cuenta_receptor,
+                "Cantidad De Dinero Enviada": cantidad_dinero_enviada,
+                "Fecha Envio": fecha_enviado
+            })
+
+        return {"status": "Historiales Encontrados", "historial": result}
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
